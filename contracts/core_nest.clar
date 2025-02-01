@@ -3,11 +3,15 @@
 ;; Data structures
 (define-map data-store 
     { owner: principal, data-id: uint } 
-    { encrypted-reference: (string-utf8 256), timestamp: uint })
+    { encrypted-reference: (string-utf8 256), 
+      encryption-key-hash: (optional (string-utf8 64)),
+      timestamp: uint })
 
 (define-map access-permissions
     { data-id: uint, granted-to: principal }
-    { can-access: bool, granted-at: uint })
+    { can-access: bool, 
+      encrypted-key: (optional (string-utf8 256)),
+      granted-at: uint })
 
 (define-map data-access-log
     { data-id: uint, accessor: principal }
@@ -21,15 +25,19 @@
 (define-constant err-no-permission (err u101))
 (define-constant err-invalid-data (err u102))
 (define-constant err-already-exists (err u103))
+(define-constant err-no-key (err u104))
 
-;; Store new data reference
-(define-public (store-data (encrypted-ref (string-utf8 256)))
+;; Store new data reference with optional encryption key hash
+(define-public (store-data 
+    (encrypted-ref (string-utf8 256))
+    (key-hash (optional (string-utf8 64))))
     (let
         ((data-id (var-get next-data-id)))
         (begin
             (map-set data-store
                 { owner: tx-sender, data-id: data-id }
-                { encrypted-reference: encrypted-ref, 
+                { encrypted-reference: encrypted-ref,
+                  encryption-key-hash: key-hash,
                   timestamp: block-height }
             )
             (var-set next-data-id (+ data-id u1))
@@ -38,15 +46,20 @@
     )
 )
 
-;; Grant access to data
-(define-public (grant-access (data-id uint) (grantee principal))
+;; Grant access to data with optional encrypted key
+(define-public (grant-access 
+    (data-id uint) 
+    (grantee principal)
+    (encrypted-key (optional (string-utf8 256))))
     (let
         ((data-entry (map-get? data-store { owner: tx-sender, data-id: data-id })))
         (if (is-some data-entry)
             (begin
                 (map-set access-permissions
                     { data-id: data-id, granted-to: grantee }
-                    { can-access: true, granted-at: block-height }
+                    { can-access: true,
+                      encrypted-key: encrypted-key,
+                      granted-at: block-height }
                 )
                 (ok true)
             )
@@ -63,7 +76,9 @@
             (begin
                 (map-set access-permissions
                     { data-id: data-id, granted-to: revokee }
-                    { can-access: false, granted-at: block-height }
+                    { can-access: false,
+                      encrypted-key: none,
+                      granted-at: block-height }
                 )
                 (ok true)
             )
@@ -72,7 +87,7 @@
     )
 )
 
-;; Access data
+;; Access data and get encryption key if available
 (define-public (access-data (data-id uint))
     (let
         ((permission (map-get? access-permissions 
@@ -84,7 +99,10 @@
                 (get can-access (unwrap-panic permission)))
             (begin
                 (log-access data-id tx-sender)
-                (ok (get encrypted-reference (unwrap-panic data-entry)))
+                (ok {
+                    reference: (get encrypted-reference (unwrap-panic data-entry)),
+                    key: (get encrypted-key (unwrap-panic permission))
+                })
             )
             err-no-permission
         )
@@ -118,4 +136,13 @@
 (define-read-only (check-access (data-id uint) (accessor principal))
     (ok (map-get? access-permissions 
         { data-id: data-id, granted-to: accessor }))
+)
+
+(define-read-only (get-key-hash (data-id uint))
+    (let ((data-entry (map-get? data-store { owner: tx-sender, data-id: data-id })))
+        (if (is-some data-entry)
+            (ok (get encryption-key-hash (unwrap-panic data-entry)))
+            err-not-owner
+        )
+    )
 )
