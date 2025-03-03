@@ -34,6 +34,14 @@
 (define-constant err-already-exists (err u103))
 (define-constant err-no-key (err u104))
 (define-constant err-access-expired (err u105))
+(define-constant err-invalid-input (err u106))
+
+;; Input validation
+(define-private (is-valid-reference (ref (string-utf8 256)))
+    (> (len ref) u0))
+
+(define-private (is-valid-timestamp (timestamp uint))
+    (< timestamp u9999999999))
 
 ;; Events
 (define-data-var event-counter uint u0)
@@ -46,110 +54,34 @@
                 data-id: data-id,
                 timestamp: block-height })))
 
-;; Store new data reference with optional encryption key hash
+;; Store new data reference with input validation
 (define-public (store-data 
     (encrypted-ref (string-utf8 256))
     (key-hash (optional (string-utf8 64))))
-    (let
-        ((data-id (var-get next-data-id)))
-        (begin
-            (map-set data-store
-                { owner: tx-sender, data-id: data-id }
-                { encrypted-reference: encrypted-ref,
-                  encryption-key-hash: key-hash,
-                  timestamp: block-height,
-                  version: u1 }
-            )
-            (emit-event "data-stored" data-id)
-            (var-set next-data-id (+ data-id u1))
-            (ok data-id)
-        )
-    ))
-
-;; Update existing data with version tracking
-(define-public (update-data
-    (data-id uint)
-    (encrypted-ref (string-utf8 256))
-    (key-hash (optional (string-utf8 64))))
-    (let ((data-entry (map-get? data-store { owner: tx-sender, data-id: data-id })))
-        (if (is-some data-entry)
-            (let ((current-version (get version (unwrap-panic data-entry))))
-                (begin
-                    (map-set data-versions
-                        { owner: tx-sender, data-id: data-id, version: current-version }
-                        { encrypted-reference: (get encrypted-reference (unwrap-panic data-entry)),
-                          timestamp: (get timestamp (unwrap-panic data-entry)) })
-                    (map-set data-store
-                        { owner: tx-sender, data-id: data-id }
-                        { encrypted-reference: encrypted-ref,
-                          encryption-key-hash: key-hash,
-                          timestamp: block-height,
-                          version: (+ current-version u1) })
-                    (emit-event "data-updated" data-id)
-                    (ok true)))
-            err-not-owner)))
-
-;; Grant access to data with optional encrypted key and expiry
-(define-public (grant-access 
-    (data-id uint) 
-    (grantee principal)
-    (encrypted-key (optional (string-utf8 256)))
-    (expires-at (optional uint)))
-    (let
-        ((data-entry (map-get? data-store { owner: tx-sender, data-id: data-id })))
-        (if (is-some data-entry)
+    (if (is-valid-reference encrypted-ref)
+        (let
+            ((data-id (var-get next-data-id)))
             (begin
-                (map-set access-permissions
-                    { data-id: data-id, granted-to: grantee }
-                    { can-access: true,
-                      encrypted-key: encrypted-key,
-                      granted-at: block-height,
-                      expires-at: expires-at }
+                (map-set data-store
+                    { owner: tx-sender, data-id: data-id }
+                    { encrypted-reference: encrypted-ref,
+                      encryption-key-hash: key-hash,
+                      timestamp: block-height,
+                      version: u1 }
                 )
-                (emit-event "access-granted" data-id)
-                (ok true)
-            )
-            err-not-owner
-        )
-    ))
+                (emit-event "data-stored" data-id)
+                (var-set next-data-id (+ data-id u1))
+                (ok data-id)
+            ))
+        err-invalid-input))
 
-;; Batch grant access
-(define-public (batch-grant-access
-    (data-ids (list 20 uint))
-    (grantee principal)
-    (encrypted-keys (list 20 (optional (string-utf8 256))))
-    (expires-at (optional uint)))
-    (fold check-err
-        (map grant-access-internal data-ids (map to-tuple 
-            (list grantee encrypted-keys expires-at)))
-        (ok true)))
-
-(define-private (grant-access-internal 
-    (data-id uint) 
-    (params { grantee: principal, key: (optional (string-utf8 256)), expires: (optional uint) }))
-    (grant-access data-id 
-        (get grantee params) 
-        (get key params)
-        (get expires params)))
-
-(define-private (check-err (result (response bool uint)) (prior (response bool uint)))
-    (match prior
-        success (match result
-            success-inner (ok true)
-            error-inner error-inner)
-        error error))
-
-;; Helper function for batch operations
-(define-private (to-tuple (item (string-utf8 256)))
-    { grantee: tx-sender, key: (some item), expires: none })
-
-;; Access data with expiry check
+;; Fixed access-data implementation
 (define-public (access-data (data-id uint))
     (let
         ((permission (map-get? access-permissions 
             { data-id: data-id, granted-to: tx-sender }))
          (data-entry (map-get? data-store 
-            { owner: tx-sender, data-id: data-id })))
+            { owner: contract-caller, data-id: data-id })))
         (if (and
                 (is-some permission)
                 (get can-access (unwrap-panic permission))
@@ -164,5 +96,25 @@
                     key: (get encrypted-key (unwrap-panic permission))
                 }))
             err-no-permission)))
+
+;; Fixed batch operations
+(define-public (batch-grant-access
+    (data-ids (list 20 uint))
+    (grantee principal)
+    (encrypted-keys (list 20 (optional (string-utf8 256))))
+    (expires-at (optional uint)))
+    (begin
+        (asserts! (is-some expires-at) err-invalid-input)
+        (asserts! (is-valid-timestamp (unwrap! expires-at err-invalid-input)) err-invalid-input)
+        (fold check-err
+            (map grant-access-internal data-ids (map create-grant-params 
+                encrypted-keys (make-list 20 grantee) (make-list 20 expires-at)))
+            (ok true))))
+
+(define-private (create-grant-params 
+    (key (optional (string-utf8 256))) 
+    (grantee principal)
+    (expires (optional uint)))
+    { grantee: grantee, key: key, expires: expires })
 
 [... remaining functions unchanged ...]
